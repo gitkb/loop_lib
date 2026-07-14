@@ -180,6 +180,36 @@ fn test_execute_command_in_directory() {
     assert!(!result.success);
     assert_eq!(result.exit_code, 1);
 }
+
+#[cfg(windows)]
+#[test]
+fn test_windows_shell_disables_autorun_and_delayed_expansion() {
+    let (shell, shell_args) = get_shell_and_args();
+    assert_eq!(shell, "cmd.exe");
+    assert_eq!(shell_args, &["/D", "/V:OFF", "/C"]);
+
+    let config = LoopConfig {
+        silent: true,
+        ..Default::default()
+    };
+    let aliases = HashMap::new();
+    let extra_env = HashMap::from([(
+        "LOOP_LIB_DELAYED_EXPANSION_TEST".to_string(),
+        "expanded".to_string(),
+    )]);
+    let temp_dir = TempDir::new().unwrap();
+
+    let result = execute_command_in_directory_capturing(
+        temp_dir.path(),
+        "echo(!LOOP_LIB_DELAYED_EXPANSION_TEST!",
+        &config,
+        &aliases,
+        Some(&extra_env),
+    );
+
+    assert!(result.success, "stderr: {}", result.stderr);
+    assert_eq!(result.stdout.trim(), "!LOOP_LIB_DELAYED_EXPANSION_TEST!");
+}
 #[test]
 fn test_run_without_looprc() {
     let temp_dir = TempDir::new().unwrap();

@@ -14,22 +14,19 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-/// Returns the shell program and command-line flag for executing commands.
-/// On Unix: uses $SHELL or /bin/sh with -c
-/// On Windows: uses cmd.exe with /c
-fn get_shell_and_flag() -> (String, &'static str) {
+/// Returns the shell program and command-line arguments for executing commands.
+/// On Unix: uses $SHELL or /bin/sh with -c.
+/// On Windows: uses cmd.exe with AutoRun and delayed expansion disabled.
+fn get_shell_and_args() -> (String, &'static [&'static str]) {
     #[cfg(windows)]
     {
-        (
-            env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string()),
-            "/c",
-        )
+        ("cmd.exe".to_string(), &["/D", "/V:OFF", "/C"])
     }
     #[cfg(not(windows))]
     {
         (
             env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string()),
-            "-c",
+            &["-c"],
         )
     }
 }
@@ -291,11 +288,11 @@ pub fn execute_command_in_directory(
         io::stdout().flush().unwrap();
     }
 
-    let (shell, shell_flag) = get_shell_and_flag();
+    let (shell, shell_args) = get_shell_and_args();
 
     let mut cmd_builder = Command::new(&shell);
     cmd_builder
-        .arg(shell_flag)
+        .args(shell_args)
         .arg(&resolved_command)
         .current_dir(dir)
         .envs(env::vars());
@@ -430,11 +427,11 @@ pub fn execute_command_in_directory_capturing(
         };
     }
 
-    let (shell, shell_flag) = get_shell_and_flag();
+    let (shell, shell_args) = get_shell_and_args();
 
     let mut cmd_builder = Command::new(&shell);
     cmd_builder
-        .arg(shell_flag)
+        .args(shell_args)
         .arg(&resolved_command)
         .current_dir(dir)
         .envs(env::vars());
