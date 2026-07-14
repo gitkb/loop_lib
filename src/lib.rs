@@ -556,7 +556,7 @@ pub fn run(orig_config: &LoopConfig, command: &str) -> Result<()> {
         .collect();
 
     // Delegate to unified execution engine
-    execute_commands_internal(orig_config, &commands)
+    execute_commands_internal(orig_config, &commands, true)
 }
 
 /// JSON output structure for command results
@@ -593,13 +593,21 @@ pub struct JsonSummary {
 
 /// Internal execution engine that handles both parallel and sequential execution.
 /// This is the unified implementation used by both `run()` and `run_commands()`.
-fn execute_commands_internal(config: &LoopConfig, commands: &[DirCommand]) -> Result<()> {
+fn execute_commands_internal(
+    config: &LoopConfig,
+    commands: &[DirCommand],
+    expand_loop_aliases: bool,
+) -> Result<()> {
     if commands.is_empty() {
         return Ok(());
     }
 
     let results = Arc::new(Mutex::new(Vec::new()));
-    let aliases = Arc::new(get_aliases());
+    let aliases = Arc::new(if expand_loop_aliases {
+        get_aliases()
+    } else {
+        HashMap::new()
+    });
 
     if config.parallel {
         // Parallel execution using rayon thread pool with spinners
@@ -905,7 +913,11 @@ fn execute_commands_internal(config: &LoopConfig, commands: &[DirCommand]) -> Re
 /// Execute a list of commands (each with its own directory)
 /// This is the unified execution engine for plugins.
 /// Applies include/exclude filters from config before executing.
-pub fn run_commands(config: &LoopConfig, commands: &[DirCommand]) -> Result<()> {
+fn run_commands_with_alias_policy(
+    config: &LoopConfig,
+    commands: &[DirCommand],
+    expand_loop_aliases: bool,
+) -> Result<()> {
     let mut filtered: Vec<DirCommand> = commands.to_vec();
 
     if let Some(ref includes) = config.include_filters {
@@ -926,7 +938,24 @@ pub fn run_commands(config: &LoopConfig, commands: &[DirCommand]) -> Result<()> 
         }
     }
 
-    execute_commands_internal(config, &filtered)
+    execute_commands_internal(config, &filtered, expand_loop_aliases)
+}
+
+/// Execute commands using aliases discovered from the user's Loop configuration.
+pub fn run_commands(config: &LoopConfig, commands: &[DirCommand]) -> Result<()> {
+    run_commands_with_alias_policy(config, commands, true)
+}
+
+/// Execute commands without rewriting their first word through Loop aliases.
+///
+/// Callers that own an executable namespace can use this path to preserve that
+/// namespace as an authority boundary while retaining Loop's filtering,
+/// parallelism, output, and dry-run behavior.
+pub fn run_commands_without_loop_aliases(
+    config: &LoopConfig,
+    commands: &[DirCommand],
+) -> Result<()> {
+    run_commands_with_alias_policy(config, commands, false)
 }
 
 pub fn should_ignore(path: &Path, ignore: &[String]) -> bool {
