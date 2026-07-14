@@ -8,6 +8,12 @@ const FAIL_CMD: &str = "cmd /c exit 1";
 #[cfg(not(windows))]
 const FAIL_CMD: &str = "false";
 
+/// Cross-platform command that succeeds without arguments
+#[cfg(windows)]
+const SUCCESS_CMD: &str = "ver";
+#[cfg(not(windows))]
+const SUCCESS_CMD: &str = "true";
+
 /// Returns a cross-platform touch command for the given path
 #[cfg(windows)]
 fn touch_cmd(path: &std::path::Path) -> String {
@@ -554,6 +560,77 @@ fn test_run_commands_parallel() {
 
     let result = run_commands(&config, &commands);
     assert!(result.is_ok());
+}
+
+#[test]
+fn test_run_commands_without_loop_aliases_blocks_looprc_aliases() {
+    const CHILD_TEST_ENV: &str = "LOOP_LIB_ALIAS_POLICY_TEST_CHILD";
+
+    if std::env::var_os(CHILD_TEST_ENV).is_some() {
+        let temp_dir = TempDir::new().unwrap();
+        let dir1 = temp_dir.path().join("dir1");
+        let dir2 = temp_dir.path().join("dir2");
+        fs::create_dir(&dir1).unwrap();
+        fs::create_dir(&dir2).unwrap();
+
+        let commands = vec![
+            DirCommand {
+                dir: dir1.to_str().unwrap().to_string(),
+                cmd: SUCCESS_CMD.to_string(),
+                env: None,
+            },
+            DirCommand {
+                dir: dir2.to_str().unwrap().to_string(),
+                cmd: SUCCESS_CMD.to_string(),
+                env: None,
+            },
+        ];
+
+        for parallel in [false, true] {
+            let config = LoopConfig {
+                parallel,
+                silent: true,
+                ..Default::default()
+            };
+
+            assert!(
+                run_commands(&config, &commands).is_err(),
+                "run_commands should expand the failing .looprc alias when parallel={parallel}"
+            );
+            assert!(
+                run_commands_without_loop_aliases(&config, &commands).is_ok(),
+                "the alias-free path should preserve the caller command when parallel={parallel}"
+            );
+        }
+        return;
+    }
+
+    let home_dir = TempDir::new().unwrap();
+    let aliases = HashMap::from([(SUCCESS_CMD, FAIL_CMD)]);
+    let looprc = serde_json::json!({
+        "aliases": aliases,
+    });
+    fs::write(
+        home_dir.path().join(".looprc"),
+        serde_json::to_vec(&looprc).unwrap(),
+    )
+    .unwrap();
+
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("tests::test_run_commands_without_loop_aliases_blocks_looprc_aliases")
+        .arg("--exact")
+        .arg("--nocapture")
+        .env(CHILD_TEST_ENV, "1")
+        .env("HOME", home_dir.path())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "isolated alias-policy test failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
 }
 
 #[test]
