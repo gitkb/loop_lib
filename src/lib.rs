@@ -223,6 +223,45 @@ pub fn add_aliases_to_global_looprc() -> Result<()> {
     Ok(())
 }
 
+/// How a directory is named in progress and result lines: `.` for the root,
+/// `./open-source/meta/loop_cli` for a directory under it, so repos that share
+/// a basename stay distinguishable. Without a root, or outside it, the basename.
+fn display_name(dir: &Path, root: Option<&Path>) -> String {
+    match root.map(|root| dir.strip_prefix(root)) {
+        Some(Ok(rel)) if rel.as_os_str().is_empty() => ".".to_string(),
+        Some(Ok(rel)) => {
+            let parts: Vec<_> = rel
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy())
+                .collect();
+            format!("./{}", parts.join("/"))
+        }
+        _ => dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(".")
+            .to_string(),
+    }
+}
+
+/// [`display_name`], with the root's folder name added: `. (harmony)`.
+fn result_name(dir: &Path, root: Option<&Path>) -> String {
+    let name = display_name(dir, root);
+    if name != "." {
+        return name;
+    }
+    let base = if dir == Path::new(".") {
+        env::current_dir().ok()
+    } else {
+        Some(dir.to_path_buf())
+    };
+    match base.as_deref().and_then(Path::file_name) {
+        Some(base) => format!(". ({})", base.to_string_lossy()),
+        None => name,
+    }
+}
+
 pub fn execute_command_in_directory(
     dir: &Path,
     command: &str,
@@ -232,10 +271,11 @@ pub fn execute_command_in_directory(
 ) -> CommandResult {
     if !dir.exists() {
         println!("\nNo directory found for {}", dir.display());
-        let dir_name = dir.file_name().unwrap_or_default().to_str().unwrap();
         println!(
             "\x1b[31m\n✗ {}: No directory found. Command: {} (Exit code: {})\x1b[0m",
-            dir_name, command, 1
+            display_name(dir, config.root_dir.as_deref()),
+            command,
+            1
         );
         return CommandResult {
             success: false,
@@ -331,43 +371,11 @@ pub fn execute_command_in_directory(
     let success = status.success();
 
     if !config.silent {
-        // Check if this directory is the root_dir (should display as ".")
-        let is_root = config
-            .root_dir
-            .as_ref()
-            .is_some_and(|root| dir == root.as_path());
-        let dir_name = if is_root {
-            "."
-        } else {
-            dir.file_name()
-                .and_then(|name| name.to_str())
-                .filter(|&s| !s.is_empty())
-                .unwrap_or(".")
-        };
+        let name = result_name(dir, config.root_dir.as_deref());
         if success {
-            if is_root {
-                // Display root as ". (basename)"
-                if let Some(base) = dir.file_name().and_then(|s| s.to_str()) {
-                    println!("\x1b[32m\n✓ . ({base})\x1b[0m");
-                } else {
-                    println!("\x1b[32m\n✓ .\x1b[0m");
-                }
-            } else if dir_name == "." {
-                // Fallback for literal "." paths
-                if let Ok(cwd) = std::env::current_dir() {
-                    if let Some(base) = cwd.file_name().and_then(|s| s.to_str()) {
-                        println!("\x1b[32m\n✓ . ({base})\x1b[0m");
-                    } else {
-                        println!("\x1b[32m\n✓ .\x1b[0m");
-                    }
-                } else {
-                    println!("\x1b[32m\n✓ .\x1b[0m");
-                }
-            } else {
-                println!("\x1b[32m\n✓ {dir_name}\x1b[0m");
-            }
+            println!("\x1b[32m\n✓ {name}\x1b[0m");
         } else {
-            println!("\x1b[31m\n✗ {dir_name}: exited code {exit_code}\x1b[0m");
+            println!("\x1b[31m\n✗ {name}: exited code {exit_code}\x1b[0m");
         }
         io::stdout().flush().unwrap();
     }
@@ -624,17 +632,8 @@ fn execute_commands_internal(config: &LoopConfig, commands: &[DirCommand]) -> Re
                     let pb = mp.add(ProgressBar::new_spinner());
                     pb.set_style(spinner_style.clone());
                     pb.set_prefix(format!("[{}/{}]", i + 1, total));
-                    let dir_path = PathBuf::from(&dir_cmd.dir);
-                    let is_root = config.root_dir.as_ref().is_some_and(|r| dir_path == *r);
-                    let dir_name = if is_root {
-                        ".".to_string()
-                    } else {
-                        dir_path
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or(".")
-                            .to_string()
-                    };
+                    let dir_name =
+                        display_name(Path::new(&dir_cmd.dir), config.root_dir.as_deref());
                     pb.set_message(format!("{dir_name}: pending..."));
                     pb.enable_steady_tick(Duration::from_millis(100));
                     Some(pb)
@@ -663,15 +662,7 @@ fn execute_commands_internal(config: &LoopConfig, commands: &[DirCommand]) -> Re
                     }
 
                     let dir = PathBuf::from(&dir_cmd.dir);
-                    let is_root = config.root_dir.as_ref().is_some_and(|r| dir == *r);
-                    let dir_name = if is_root {
-                        ".".to_string()
-                    } else {
-                        dir.file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or(".")
-                            .to_string()
-                    };
+                    let dir_name = display_name(&dir, config.root_dir.as_deref());
 
                     // Update spinner to show running
                     if let Some(ref pb) = spinners[i] {
@@ -713,33 +704,12 @@ fn execute_commands_internal(config: &LoopConfig, commands: &[DirCommand]) -> Re
             execute_parallel()
         };
 
-        // Store results (already collected from rayon), sorted for deterministic output
-        // Sort by directory name: root_dir first (displayed as "."), then alphabetical
+        // Store results (already collected from rayon), sorted for deterministic output:
+        // the root (".") first, then by displayed path
         let mut sorted_results = parallel_results;
-        sorted_results.sort_by(|a, b| {
-            let a_is_root = config.root_dir.as_ref().is_some_and(|r| a.directory == *r);
-            let b_is_root = config.root_dir.as_ref().is_some_and(|r| b.directory == *r);
-            let a_name = a
-                .directory
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or(".");
-            let b_name = b
-                .directory
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or(".");
-            match (a_is_root, b_is_root) {
-                (true, true) => std::cmp::Ordering::Equal,
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                _ => match (a_name, b_name) {
-                    (".", ".") => std::cmp::Ordering::Equal,
-                    (".", _) => std::cmp::Ordering::Less,
-                    (_, ".") => std::cmp::Ordering::Greater,
-                    _ => a_name.cmp(b_name),
-                },
-            }
+        sorted_results.sort_by_cached_key(|r| {
+            let name = display_name(&r.directory, config.root_dir.as_deref());
+            (name != ".", name)
         });
         results
             .lock()
@@ -763,26 +733,7 @@ fn execute_commands_internal(config: &LoopConfig, commands: &[DirCommand]) -> Re
             }
 
             for result in results.iter() {
-                // Check if this directory is the root_dir (should display as ".")
-                let is_root = config
-                    .root_dir
-                    .as_ref()
-                    .is_some_and(|r| result.directory == *r);
-                let dir_name = if is_root {
-                    // Display root as ". (basename)"
-                    if let Some(base) = result.directory.file_name().and_then(|s| s.to_str()) {
-                        format!(". ({base})")
-                    } else {
-                        ".".to_string()
-                    }
-                } else {
-                    result
-                        .directory
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or(".")
-                        .to_string()
-                };
+                let dir_name = result_name(&result.directory, config.root_dir.as_deref());
 
                 let has_output =
                     !result.stdout.trim().is_empty() || !result.stderr.trim().is_empty();
@@ -883,10 +834,15 @@ fn execute_commands_internal(config: &LoopConfig, commands: &[DirCommand]) -> Re
                 total
             );
             for result in &failed {
+                // Without a root the basename is ambiguous, so keep the full path
+                let name = match config.root_dir.as_deref() {
+                    Some(root) => result_name(&result.directory, Some(root)),
+                    None => result.directory.display().to_string(),
+                };
                 println!(
                     "\n{} {}: {} (Exit code {}) ",
                     "✗".red(),
-                    result.directory.display(),
+                    name,
                     result.command,
                     result.exit_code
                 );
