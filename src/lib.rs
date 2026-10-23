@@ -225,23 +225,27 @@ pub fn add_aliases_to_global_looprc() -> Result<()> {
 
 /// How a directory is named in progress and result lines: `.` for the root,
 /// `./open-source/meta/loop_cli` for a directory under it, so repos that share
-/// a basename stay distinguishable. Without a root, or outside it, the basename.
+/// a basename stay distinguishable, and the full path for one outside it.
+/// Without a root, the basename.
 fn display_name(dir: &Path, root: Option<&Path>) -> String {
-    match root.map(|root| dir.strip_prefix(root)) {
-        Some(Ok(rel)) if rel.as_os_str().is_empty() => ".".to_string(),
-        Some(Ok(rel)) => {
+    let Some(root) = root else {
+        return dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(".")
+            .to_string();
+    };
+    match dir.strip_prefix(root) {
+        Ok(rel) if rel.as_os_str().is_empty() => ".".to_string(),
+        Ok(rel) => {
             let parts: Vec<_> = rel
                 .components()
                 .map(|c| c.as_os_str().to_string_lossy())
                 .collect();
             format!("./{}", parts.join("/"))
         }
-        _ => dir
-            .file_name()
-            .and_then(|n| n.to_str())
-            .filter(|s| !s.is_empty())
-            .unwrap_or(".")
-            .to_string(),
+        Err(_) => dir.display().to_string(),
     }
 }
 

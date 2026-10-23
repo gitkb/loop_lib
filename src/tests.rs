@@ -782,10 +782,10 @@ fn test_display_name_is_path_from_root() {
         display_name(Path::new("/ws/harmony/agent"), Some(root)),
         display_name(Path::new("/ws/harmony/open-source/meta/agent"), Some(root))
     );
-    // Without a root, or outside it, the basename
+    // Outside the root, the full path; without a root, the basename
     assert_eq!(
         display_name(Path::new("/ws/other/repo"), Some(root)),
-        "repo"
+        Path::new("/ws/other/repo").display().to_string()
     );
     assert_eq!(display_name(Path::new("./repo"), None), "repo");
     assert_eq!(result_name(root, Some(root)), ". (harmony)");
