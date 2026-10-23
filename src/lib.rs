@@ -709,11 +709,12 @@ fn execute_commands_internal(config: &LoopConfig, commands: &[DirCommand]) -> Re
         };
 
         // Store results (already collected from rayon), sorted for deterministic output:
-        // the root (".") first, then by displayed path
+        // the root (".") first, then by displayed path, component by component so
+        // nested repos sit under their parent (`a/b` before `a-b`)
         let mut sorted_results = parallel_results;
         sorted_results.sort_by_cached_key(|r| {
             let name = display_name(&r.directory, config.root_dir.as_deref());
-            (name != ".", name)
+            (name != ".", PathBuf::from(name))
         });
         results
             .lock()
