@@ -765,3 +765,28 @@ fn test_dir_command_serialization() {
     assert_eq!(parsed.dir, "/path/to/dir");
     assert_eq!(parsed.cmd, "git status");
 }
+
+#[test]
+fn test_display_name_is_path_from_root() {
+    let root = Path::new("/ws/harmony");
+    assert_eq!(display_name(root, Some(root)), ".");
+    assert_eq!(
+        display_name(
+            Path::new("/ws/harmony/open-source/meta/loop_cli"),
+            Some(root)
+        ),
+        "./open-source/meta/loop_cli"
+    );
+    // Two repos with the same basename stay distinguishable
+    assert_ne!(
+        display_name(Path::new("/ws/harmony/agent"), Some(root)),
+        display_name(Path::new("/ws/harmony/open-source/meta/agent"), Some(root))
+    );
+    // Outside the root, the full path; without a root, the basename
+    assert_eq!(
+        display_name(Path::new("/ws/other/repo"), Some(root)),
+        Path::new("/ws/other/repo").display().to_string()
+    );
+    assert_eq!(display_name(Path::new("./repo"), None), "repo");
+    assert_eq!(result_name(root, Some(root)), ". (harmony)");
+}
