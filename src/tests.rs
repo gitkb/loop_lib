@@ -460,7 +460,10 @@ fn test_dry_run_returns_success() {
 
     // Even a command that would fail should succeed in dry_run mode
     let result = run(&config, &fail_cmd());
-    assert!(result.is_ok(), "dry_run should always succeed");
+    assert!(
+        result.is_ok(),
+        "a dry run of a command that would fail succeeds"
+    );
 }
 
 #[test]
