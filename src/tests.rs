@@ -2,22 +2,35 @@ use super::*;
 use std::fs;
 use tempfile::TempDir;
 
+/// `script` run by the platform shell, the way a user asks for one
+fn sh(script: &str) -> Vec<String> {
+    let shell: &[&str] = if cfg!(windows) {
+        &["cmd", "/c"]
+    } else {
+        &["sh", "-c"]
+    };
+    shell
+        .iter()
+        .map(|s| s.to_string())
+        .chain([script.to_string()])
+        .collect()
+}
+
 /// Cross-platform command that always fails with exit code 1
-#[cfg(windows)]
-const FAIL_CMD: &str = "cmd /c exit 1";
-#[cfg(not(windows))]
-const FAIL_CMD: &str = "false";
+fn fail_cmd() -> Vec<String> {
+    sh("exit 1")
+}
 
 /// Returns a cross-platform touch command for the given path
 #[cfg(windows)]
-fn touch_cmd(path: &std::path::Path) -> String {
+fn touch_cmd(path: &std::path::Path) -> Vec<String> {
     // Simple echo redirect works with cmd /c
     // The > creates the file if it doesn't exist
-    format!("echo.>\"{}\"", path.display())
+    sh(&format!("echo.>\"{}\"", path.display()))
 }
 #[cfg(not(windows))]
-fn touch_cmd(path: &std::path::Path) -> String {
-    format!("touch {}", path.display())
+fn touch_cmd(path: &std::path::Path) -> Vec<String> {
+    vec!["touch".to_string(), path.display().to_string()]
 }
 
 #[test]
@@ -117,8 +130,6 @@ fn test_run() {
         verbose: false,
         silent: true,
         add_aliases_to_global_looprc: false,
-        include_filters: None,
-        exclude_filters: None,
         parallel: false,
         dry_run: false,
         json_output: false,
@@ -128,11 +139,11 @@ fn test_run() {
         root_dir: None,
     };
 
-    let result = run(&config, "echo test");
+    let result = run(&config, &sh("echo test"));
     assert!(result.is_ok());
 
     // Test with a failing command
-    let result = run(&config, FAIL_CMD);
+    let result = run(&config, &fail_cmd());
     assert!(result.is_err()); // The function should return an error if any command fails
 }
 
@@ -166,11 +177,12 @@ fn test_execute_command_in_directory() {
     let temp_dir = TempDir::new().unwrap();
 
     let result =
-        execute_command_in_directory(temp_dir.path(), "echo test", &config, &aliases, None);
+        execute_command_in_directory(temp_dir.path(), &sh("echo test"), &config, &aliases, None);
     assert!(result.success);
     assert_eq!(result.exit_code, 0);
 
-    let result = execute_command_in_directory(temp_dir.path(), FAIL_CMD, &config, &aliases, None);
+    let result =
+        execute_command_in_directory(temp_dir.path(), &fail_cmd(), &config, &aliases, None);
     assert!(!result.success);
     assert_eq!(result.exit_code, 1);
 }
@@ -189,8 +201,6 @@ fn test_run_without_looprc() {
         verbose: false,
         silent: true,
         add_aliases_to_global_looprc: false,
-        include_filters: None,
-        exclude_filters: None,
         parallel: false,
         dry_run: false,
         json_output: false,
@@ -200,7 +210,7 @@ fn test_run_without_looprc() {
         root_dir: None,
     };
 
-    let result = run(&config, "echo test");
+    let result = run(&config, &sh("echo test"));
     assert!(result.is_ok());
 }
 
@@ -224,8 +234,6 @@ fn test_run_parallel() {
         verbose: false,
         silent: true,
         add_aliases_to_global_looprc: false,
-        include_filters: None,
-        exclude_filters: None,
         parallel: true,
         dry_run: false,
         json_output: false,
@@ -235,11 +243,11 @@ fn test_run_parallel() {
         root_dir: None,
     };
 
-    let result = run(&config, "echo test");
+    let result = run(&config, &sh("echo test"));
     assert!(result.is_ok());
 
     // Test with a failing command in parallel mode
-    let result = run(&config, FAIL_CMD);
+    let result = run(&config, &fail_cmd());
     assert!(result.is_err());
 }
 
@@ -255,7 +263,7 @@ fn test_execute_command_in_directory_capturing() {
 
     let result = execute_command_in_directory_capturing(
         temp_dir.path(),
-        "echo hello",
+        &sh("echo hello"),
         &config,
         &aliases,
         None,
@@ -264,8 +272,13 @@ fn test_execute_command_in_directory_capturing() {
     assert_eq!(result.exit_code, 0);
     assert!(result.stdout.contains("hello"));
 
-    let result =
-        execute_command_in_directory_capturing(temp_dir.path(), FAIL_CMD, &config, &aliases, None);
+    let result = execute_command_in_directory_capturing(
+        temp_dir.path(),
+        &fail_cmd(),
+        &config,
+        &aliases,
+        None,
+    );
     assert!(!result.success);
     assert_eq!(result.exit_code, 1);
 }
@@ -283,7 +296,7 @@ fn test_execute_command_in_directory_capturing_stderr() {
     // Command that writes to stderr
     let result = execute_command_in_directory_capturing(
         temp_dir.path(),
-        "echo error >&2",
+        &sh("echo error >&2"),
         &config,
         &aliases,
         None,
@@ -302,8 +315,13 @@ fn test_execute_command_nonexistent_directory() {
     let aliases = HashMap::new();
     let nonexistent = Path::new("/nonexistent/path/that/does/not/exist");
 
-    let result =
-        execute_command_in_directory_capturing(nonexistent, "echo test", &config, &aliases, None);
+    let result = execute_command_in_directory_capturing(
+        nonexistent,
+        &sh("echo test"),
+        &config,
+        &aliases,
+        None,
+    );
     assert!(!result.success);
     assert_eq!(result.exit_code, 1);
     assert!(result.stderr.contains("does not exist"));
@@ -318,75 +336,82 @@ fn test_command_result_default() {
     assert!(result.stderr.is_empty());
 }
 
-#[test]
-fn test_include_filters() {
+fn strings(values: &[&str]) -> Vec<String> {
+    values.iter().map(|s| s.to_string()).collect()
+}
+
+/// What git receives as its arguments, quoted by git itself
+fn git_sees(argv: &[&str], aliases: &HashMap<String, String>) -> String {
     let temp_dir = TempDir::new().unwrap();
-    let dir1 = temp_dir.path().join("project_a");
-    let dir2 = temp_dir.path().join("project_b");
-    let dir3 = temp_dir.path().join("other");
-    fs::create_dir(&dir1).unwrap();
-    fs::create_dir(&dir2).unwrap();
-    fs::create_dir(&dir3).unwrap();
-
-    let config = LoopConfig {
-        directories: vec![
-            dir1.to_str().unwrap().to_string(),
-            dir2.to_str().unwrap().to_string(),
-            dir3.to_str().unwrap().to_string(),
-        ],
-        ignore: vec![],
-        verbose: false,
-        silent: true,
-        add_aliases_to_global_looprc: false,
-        include_filters: Some(vec!["project".to_string()]),
-        exclude_filters: None,
-        parallel: false,
-        dry_run: false,
-        json_output: false,
-        spawn_stagger_ms: 0,
-        env: None,
-        max_parallel: None,
-        root_dir: None,
-    };
-
-    // The run function should only execute on directories matching the filter
-    let result = run(&config, "echo test");
-    assert!(result.is_ok());
+    let config = LoopConfig::default();
+    let result = execute_command_in_directory_capturing(
+        temp_dir.path(),
+        &strings(argv),
+        &config,
+        aliases,
+        None,
+    );
+    assert!(result.success, "{}", result.stderr);
+    assert!(fs::read_dir(temp_dir.path()).unwrap().next().is_none());
+    result.stdout.trim().to_string()
 }
 
 #[test]
-fn test_exclude_filters() {
-    let temp_dir = TempDir::new().unwrap();
-    let dir1 = temp_dir.path().join("project_a");
-    let dir2 = temp_dir.path().join("project_b");
-    let dir3 = temp_dir.path().join("excluded");
-    fs::create_dir(&dir1).unwrap();
-    fs::create_dir(&dir2).unwrap();
-    fs::create_dir(&dir3).unwrap();
+fn arguments_reach_the_program_as_given() {
+    let hostile = [
+        "one arg",
+        "$(touch PWNED)",
+        "a;touch PWNED",
+        "*",
+        "%h %s",
+        "'\"",
+        "",
+    ];
+    let argv: Vec<&str> = ["git", "rev-parse", "--sq-quote"]
+        .into_iter()
+        .chain(hostile)
+        .collect();
+    let quoted: Vec<String> = hostile
+        .iter()
+        .map(|arg| format!("'{}'", arg.replace('\'', "'\\''")))
+        .collect();
+    assert_eq!(git_sees(&argv, &HashMap::new()), quoted.join(" "));
+}
 
+#[test]
+fn aliases_expand_into_words_not_shell() {
+    let aliases = HashMap::from([(
+        "q".to_string(),
+        "git rev-parse --sq-quote 'two words' ;".to_string(),
+    )]);
+    assert_eq!(git_sees(&["q", "$(x)"], &aliases), "'two words' ';' '$(x)'");
+
+    let broken = HashMap::from([("q".to_string(), "git 'unclosed".to_string())]);
+    for dry_run in [false, true] {
+        let config = LoopConfig {
+            dry_run,
+            ..LoopConfig::default()
+        };
+        let result = execute_command_in_directory_capturing(
+            Path::new("."),
+            &strings(&["q"]),
+            &config,
+            &broken,
+            None,
+        );
+        assert!(!result.success);
+        assert!(result.stderr.contains("Alias 'q'"), "{}", result.stderr);
+    }
+}
+
+#[test]
+fn a_missing_program_fails_without_panicking() {
     let config = LoopConfig {
-        directories: vec![
-            dir1.to_str().unwrap().to_string(),
-            dir2.to_str().unwrap().to_string(),
-            dir3.to_str().unwrap().to_string(),
-        ],
-        ignore: vec![],
-        verbose: false,
+        directories: vec![".".to_string()],
         silent: true,
-        add_aliases_to_global_looprc: false,
-        include_filters: None,
-        exclude_filters: Some(vec!["excluded".to_string()]),
-        parallel: false,
-        dry_run: false,
-        json_output: false,
-        spawn_stagger_ms: 0,
-        env: None,
-        max_parallel: None,
-        root_dir: None,
+        ..LoopConfig::default()
     };
-
-    let result = run(&config, "echo test");
-    assert!(result.is_ok());
+    assert!(run(&config, &strings(&["meta-no-such-program-xyz"])).is_err());
 }
 
 // ============================================================================
@@ -434,8 +459,11 @@ fn test_dry_run_returns_success() {
     };
 
     // Even a command that would fail should succeed in dry_run mode
-    let result = run(&config, FAIL_CMD);
-    assert!(result.is_ok(), "dry_run should always succeed");
+    let result = run(&config, &fail_cmd());
+    assert!(
+        result.is_ok(),
+        "a dry run of a command that would fail succeeds"
+    );
 }
 
 #[test]
@@ -448,7 +476,8 @@ fn test_execute_command_in_directory_dry_run() {
     let aliases = HashMap::new();
     let temp_dir = TempDir::new().unwrap();
 
-    let result = execute_command_in_directory(temp_dir.path(), FAIL_CMD, &config, &aliases, None);
+    let result =
+        execute_command_in_directory(temp_dir.path(), &fail_cmd(), &config, &aliases, None);
     assert!(result.success, "dry_run should return success");
     assert_eq!(result.exit_code, 0);
 }
@@ -465,7 +494,7 @@ fn test_execute_command_in_directory_capturing_dry_run() {
 
     let result = execute_command_in_directory_capturing(
         temp_dir.path(),
-        "echo hello",
+        &sh("echo hello"),
         &config,
         &aliases,
         None,
@@ -479,11 +508,11 @@ fn test_execute_command_in_directory_capturing_dry_run() {
 fn test_dir_command_struct() {
     let cmd = DirCommand {
         dir: "/some/path".to_string(),
-        cmd: "git status".to_string(),
+        argv: vec!["git".to_string(), "status".to_string()],
         env: None,
     };
     assert_eq!(cmd.dir, "/some/path");
-    assert_eq!(cmd.cmd, "git status");
+    assert_eq!(cmd.argv, ["git", "status"]);
 }
 
 #[test]
@@ -511,12 +540,12 @@ fn test_run_commands_sequential() {
     let commands = vec![
         DirCommand {
             dir: dir1.to_str().unwrap().to_string(),
-            cmd: "echo test1".to_string(),
+            argv: sh("echo test1"),
             env: None,
         },
         DirCommand {
             dir: dir2.to_str().unwrap().to_string(),
-            cmd: "echo test2".to_string(),
+            argv: sh("echo test2"),
             env: None,
         },
     ];
@@ -542,12 +571,12 @@ fn test_run_commands_parallel() {
     let commands = vec![
         DirCommand {
             dir: dir1.to_str().unwrap().to_string(),
-            cmd: "echo test1".to_string(),
+            argv: sh("echo test1"),
             env: None,
         },
         DirCommand {
             dir: dir2.to_str().unwrap().to_string(),
-            cmd: "echo test2".to_string(),
+            argv: sh("echo test2"),
             env: None,
         },
     ];
@@ -575,12 +604,12 @@ fn test_run_commands_with_different_commands() {
     let commands = vec![
         DirCommand {
             dir: dir1.to_str().unwrap().to_string(),
-            cmd: "echo command1".to_string(),
+            argv: sh("echo command1"),
             env: None,
         },
         DirCommand {
             dir: dir2.to_str().unwrap().to_string(),
-            cmd: "echo command2".to_string(),
+            argv: sh("echo command2"),
             env: None,
         },
     ];
@@ -605,7 +634,7 @@ fn test_run_commands_dry_run() {
 
     let commands = vec![DirCommand {
         dir: temp_dir.path().to_str().unwrap().to_string(),
-        cmd: touch_cmd(&marker_file),
+        argv: touch_cmd(&marker_file),
         env: None,
     }];
 
@@ -628,7 +657,7 @@ fn test_run_commands_failure_handling() {
 
     let commands = vec![DirCommand {
         dir: dir1.to_str().unwrap().to_string(),
-        cmd: FAIL_CMD.to_string(), // This command always fails
+        argv: fail_cmd(), // This command always fails
         env: None,
     }];
 
@@ -648,7 +677,7 @@ fn test_run_commands_failure_in_dry_run_succeeds() {
 
     let commands = vec![DirCommand {
         dir: temp_dir.path().to_str().unwrap().to_string(),
-        cmd: FAIL_CMD.to_string(),
+        argv: fail_cmd(),
         env: None,
     }];
 
@@ -752,18 +781,18 @@ fn test_loop_config_deserialization_missing_new_fields() {
 fn test_dir_command_serialization() {
     let cmd = DirCommand {
         dir: "/path/to/dir".to_string(),
-        cmd: "git status".to_string(),
+        argv: vec!["git".to_string(), "status".to_string()],
         env: None,
     };
 
     let json = serde_json::to_string(&cmd).unwrap();
     assert!(json.contains("\"dir\":\"/path/to/dir\""));
-    assert!(json.contains("\"cmd\":\"git status\""));
+    assert!(json.contains("\"argv\":[\"git\",\"status\"]"));
 
     // Test deserialization
     let parsed: DirCommand = serde_json::from_str(&json).unwrap();
     assert_eq!(parsed.dir, "/path/to/dir");
-    assert_eq!(parsed.cmd, "git status");
+    assert_eq!(parsed.argv, ["git", "status"]);
 }
 
 #[test]
