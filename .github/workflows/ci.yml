@@ -23,12 +23,28 @@ jobs:
         with:
           path: loop_lib
 
+      - name: Clone dependencies
+        shell: bash
+        env:
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: |
+          for repo in meta_core; do
+            if git clone --depth 1 -b "$BRANCH" "https://github.com/gitkb/${repo}.git" 2>/dev/null; then
+              echo "Cloned ${repo}@${BRANCH}"
+            elif git clone --depth 1 "https://github.com/gitkb/${repo}.git"; then
+              echo "Branch ${BRANCH} not found for ${repo}; falling back to default branch"
+            else
+              echo "::error::Failed to clone ${repo}"
+              exit 1
+            fi
+          done
+
       - name: Create workspace Cargo.toml
         shell: bash
         run: |
           cat > Cargo.toml << 'EOF'
           [workspace]
-          members = ["loop_lib"]
+          members = ["loop_lib", "meta_core"]
           resolver = "2"
 
           [workspace.package]
@@ -59,11 +75,27 @@ jobs:
         with:
           path: loop_lib
 
+      - name: Clone dependencies
+        shell: bash
+        env:
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: |
+          for repo in meta_core; do
+            if git clone --depth 1 -b "$BRANCH" "https://github.com/gitkb/${repo}.git" 2>/dev/null; then
+              echo "Cloned ${repo}@${BRANCH}"
+            elif git clone --depth 1 "https://github.com/gitkb/${repo}.git"; then
+              echo "Branch ${BRANCH} not found for ${repo}; falling back to default branch"
+            else
+              echo "::error::Failed to clone ${repo}"
+              exit 1
+            fi
+          done
+
       - name: Create workspace Cargo.toml
         run: |
           cat > Cargo.toml << 'EOF'
           [workspace]
-          members = ["loop_lib"]
+          members = ["loop_lib", "meta_core"]
           resolver = "2"
 
           [workspace.package]
@@ -96,11 +128,27 @@ jobs:
         with:
           path: loop_lib
 
+      - name: Clone dependencies
+        shell: bash
+        env:
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: |
+          for repo in meta_core; do
+            if git clone --depth 1 -b "$BRANCH" "https://github.com/gitkb/${repo}.git" 2>/dev/null; then
+              echo "Cloned ${repo}@${BRANCH}"
+            elif git clone --depth 1 "https://github.com/gitkb/${repo}.git"; then
+              echo "Branch ${BRANCH} not found for ${repo}; falling back to default branch"
+            else
+              echo "::error::Failed to clone ${repo}"
+              exit 1
+            fi
+          done
+
       - name: Create workspace Cargo.toml
         run: |
           cat > Cargo.toml << 'EOF'
           [workspace]
-          members = ["loop_lib"]
+          members = ["loop_lib", "meta_core"]
           resolver = "2"
 
           [workspace.package]
