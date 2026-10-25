@@ -586,7 +586,7 @@ fn execute_commands_internal(config: &LoopConfig, commands: &[DirCommand]) -> Re
             None
         };
         let spinner_style = ProgressStyle::with_template("{prefix:.bold.dim} {spinner} {wide_msg}")
-            .unwrap()
+            .unwrap_or_else(|_| ProgressStyle::default_spinner())
             .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈ ");
 
         let total = commands.len();
@@ -666,7 +666,7 @@ fn execute_commands_internal(config: &LoopConfig, commands: &[DirCommand]) -> Re
             let pool = ThreadPoolBuilder::new()
                 .num_threads(max)
                 .build()
-                .expect("Failed to create thread pool");
+                .context("Failed to create thread pool")?;
             pool.install(execute_parallel)
         } else {
             execute_parallel()
