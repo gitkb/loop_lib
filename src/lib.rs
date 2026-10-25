@@ -14,26 +14,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-/// Returns the shell program and command-line flag for executing commands.
-/// On Unix: uses $SHELL or /bin/sh with -c
-/// On Windows: uses cmd.exe with /c
-fn get_shell_and_flag() -> (String, &'static str) {
-    #[cfg(windows)]
-    {
-        (
-            env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string()),
-            "/c",
-        )
-    }
-    #[cfg(not(windows))]
-    {
-        (
-            env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string()),
-            "-c",
-        )
-    }
-}
-
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LoopConfig {
     #[serde(default)]
@@ -81,7 +61,8 @@ pub struct LoopConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DirCommand {
     pub dir: String,
-    pub cmd: String,
+    /// The program and its arguments, run as given: no shell parses them.
+    pub argv: Vec<String>,
     /// Environment variables to set for this command's subprocess
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env: Option<HashMap<String, String>>,
@@ -236,17 +217,22 @@ fn display_name(dir: &Path, root: Option<&Path>) -> String {
             .unwrap_or(".")
             .to_string();
     };
-    match dir.strip_prefix(root) {
-        Ok(rel) if rel.as_os_str().is_empty() => ".".to_string(),
-        Ok(rel) => {
-            let parts: Vec<_> = rel
-                .components()
-                .map(|c| c.as_os_str().to_string_lossy())
-                .collect();
-            format!("./{}", parts.join("/"))
-        }
-        Err(_) => dir.display().to_string(),
+    match path_from(dir, root) {
+        Some(rel) if rel.is_empty() => ".".to_string(),
+        Some(rel) => format!("./{rel}"),
+        None => dir.display().to_string(),
     }
+}
+
+/// `dir`'s path from `root`, `/`-separated and empty for `root` itself;
+/// None when `dir` is not under `root`.
+fn path_from(dir: &Path, root: &Path) -> Option<String> {
+    let rel = dir.strip_prefix(root).ok()?;
+    let parts: Vec<_> = rel
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect();
+    Some(parts.join("/"))
 }
 
 /// [`display_name`], with the root's folder name added: `. (harmony)`.
@@ -266,9 +252,73 @@ fn result_name(dir: &Path, root: Option<&Path>) -> String {
     }
 }
 
+/// `argv` with a `.looprc` alias for its program expanded. The alias value is
+/// split into words the way a POSIX shell splits them (quotes are honored,
+/// nothing is expanded or run) and replaces the program.
+fn resolve_aliases(argv: &[String], aliases: &HashMap<String, String>) -> Result<Vec<String>> {
+    let Some((program, args)) = argv.split_first() else {
+        anyhow::bail!("No command given");
+    };
+    let Some(alias) = aliases.get(program) else {
+        return Ok(argv.to_vec());
+    };
+    let mut words = shlex::split(alias)
+        .filter(|words| !words.is_empty())
+        .with_context(|| format!("Alias '{program}' is not a command: {alias}"))?;
+    words.extend_from_slice(args);
+    Ok(words)
+}
+
+/// `argv` as one line, quoted so that it reads back as the same words.
+pub fn display_command(argv: &[String]) -> String {
+    shlex::try_join(argv.iter().map(String::as_str)).unwrap_or_else(|_| argv.join(" "))
+}
+
+/// The process for `argv` in `dir`. The program runs directly: no shell sees
+/// the arguments, so quotes, `$()`, `;` and globs in them stay literal.
+fn build_command(
+    argv: &[String],
+    dir: &Path,
+    extra_env: Option<&HashMap<String, String>>,
+) -> Result<Command> {
+    let (program, args) = argv
+        .split_first()
+        .ok_or_else(|| anyhow::anyhow!("No command given"))?;
+    let mut cmd = Command::new(program);
+    cmd.args(args).current_dir(dir);
+    // Plugin-specified environment variables (e.g., GIT_PAGER=cat)
+    if let Some(extra) = extra_env {
+        cmd.envs(extra);
+    }
+    Ok(cmd)
+}
+
+fn failed_result(dir: &Path, command: String, stderr: String) -> CommandResult {
+    CommandResult {
+        success: false,
+        exit_code: -1,
+        directory: dir.to_path_buf(),
+        command,
+        stdout: String::new(),
+        stderr,
+    }
+}
+
+/// The dry-run line for `command` in `dir`.
+fn dry_run_line(dir: &Path, command: &str) -> String {
+    let dir_display = if dir.as_os_str() == "." {
+        env::current_dir()
+            .map(|cwd| cwd.display().to_string())
+            .unwrap_or_else(|_| ".".to_string())
+    } else {
+        dir.display().to_string()
+    };
+    format!("Would execute in {dir_display}:\n  {command}")
+}
+
 pub fn execute_command_in_directory(
     dir: &Path,
-    command: &str,
+    argv: &[String],
     config: &LoopConfig,
     aliases: &HashMap<String, String>,
     extra_env: Option<&HashMap<String, String>>,
@@ -278,49 +328,34 @@ pub fn execute_command_in_directory(
         println!(
             "\x1b[31m\n✗ {}: No directory found. Command: {} (Exit code: {})\x1b[0m",
             display_name(dir, config.root_dir.as_deref()),
-            command,
+            display_command(argv),
             1
         );
         return CommandResult {
-            success: false,
             exit_code: 1,
-            directory: dir.to_path_buf(),
-            command: command.to_string(),
-            stdout: String::new(),
-            stderr: String::new(),
+            ..failed_result(dir, display_command(argv), String::new())
         };
     }
 
-    // Resolve aliases for display
-    let resolved_command = command
-        .split_whitespace()
-        .next()
-        .and_then(|cmd| aliases.get(cmd).map(|alias_cmd| (cmd, alias_cmd)))
-        .map(|(cmd, alias_cmd)| command.replacen(cmd, alias_cmd, 1))
-        .unwrap_or_else(|| command.to_string());
+    let argv = match resolve_aliases(argv, aliases) {
+        Ok(argv) => argv,
+        Err(e) => {
+            if !config.silent {
+                eprintln!("{e:#}");
+            }
+            return failed_result(dir, display_command(argv), format!("{e:#}\n"));
+        }
+    };
+    let command = display_command(&argv);
 
     // Dry run mode: print what would be executed without running it
     if config.dry_run {
-        let dir_display = if dir.as_os_str() == "." {
-            if let Ok(cwd) = std::env::current_dir() {
-                cwd.display().to_string()
-            } else {
-                ".".to_string()
-            }
-        } else {
-            dir.display().to_string()
-        };
-        println!(
-            "{} Would execute in {}:\n  {}",
-            "[DRY RUN]".cyan(),
-            dir_display.yellow(),
-            resolved_command
-        );
+        println!("{} {}", "[DRY RUN]".cyan(), dry_run_line(dir, &command));
         return CommandResult {
             success: true,
             exit_code: 0,
             directory: dir.to_path_buf(),
-            command: resolved_command,
+            command,
             stdout: String::new(),
             stderr: String::new(),
         };
@@ -332,25 +367,11 @@ pub fn execute_command_in_directory(
 
     if !config.silent {
         println!();
-        io::stdout().flush().unwrap();
+        io::stdout().flush().ok();
     }
 
-    let (shell, shell_flag) = get_shell_and_flag();
-
-    let mut cmd_builder = Command::new(&shell);
-    cmd_builder
-        .arg(shell_flag)
-        .arg(&resolved_command)
-        .current_dir(dir)
-        .envs(env::vars());
-
-    // Apply plugin-specified environment variables (e.g., GIT_PAGER=cat)
-    if let Some(extra) = extra_env {
-        cmd_builder.envs(extra);
-    }
-
-    let mut child = cmd_builder
-        .stdout(if config.silent {
+    let status = build_command(&argv, dir, extra_env).and_then(|mut cmd| {
+        cmd.stdout(if config.silent {
             Stdio::null()
         } else {
             Stdio::inherit()
@@ -360,19 +381,18 @@ pub fn execute_command_in_directory(
         } else {
             Stdio::inherit()
         })
-        .spawn()
-        .with_context(|| {
-            format!(
-                "Failed to execute command '{}' in directory '{}'",
-                resolved_command,
-                dir.display()
-            )
-        })
-        .expect("Failed to execute command");
-
-    let status = child.wait().expect("Failed to wait on child process");
-    let exit_code = status.code().unwrap_or(-1);
-    let success = status.success();
+        .status()
+        .with_context(|| format!("Failed to run {command}"))
+    });
+    let (success, exit_code) = match status {
+        Ok(status) => (status.success(), status.code().unwrap_or(-1)),
+        Err(e) => {
+            if !config.silent {
+                eprintln!("{e:#}");
+            }
+            (false, -1)
+        }
+    };
 
     if !config.silent {
         let name = result_name(dir, config.root_dir.as_deref());
@@ -381,14 +401,14 @@ pub fn execute_command_in_directory(
         } else {
             println!("\x1b[31m\n✗ {name}: exited code {exit_code}\x1b[0m");
         }
-        io::stdout().flush().unwrap();
+        io::stdout().flush().ok();
     }
 
     CommandResult {
         success,
         exit_code,
         directory: dir.to_path_buf(),
-        command: resolved_command,
+        command,
         stdout: String::new(), // Sequential mode uses Stdio::inherit(), so no capture
         stderr: String::new(),
     }
@@ -397,64 +417,45 @@ pub fn execute_command_in_directory(
 /// Capturing version for parallel execution - captures stdout/stderr for display after completion
 pub fn execute_command_in_directory_capturing(
     dir: &Path,
-    command: &str,
+    argv: &[String],
     config: &LoopConfig,
     aliases: &HashMap<String, String>,
     extra_env: Option<&HashMap<String, String>>,
 ) -> CommandResult {
     if !dir.exists() {
         return CommandResult {
-            success: false,
             exit_code: 1,
-            directory: dir.to_path_buf(),
-            command: command.to_string(),
-            stdout: String::new(),
-            stderr: format!("Directory does not exist: {}", dir.display()),
+            ..failed_result(
+                dir,
+                display_command(argv),
+                format!("Directory does not exist: {}", dir.display()),
+            )
         };
     }
 
-    let resolved_command = command
-        .split_whitespace()
-        .next()
-        .and_then(|cmd| aliases.get(cmd).map(|alias_cmd| (cmd, alias_cmd)))
-        .map(|(cmd, alias_cmd)| command.replacen(cmd, alias_cmd, 1))
-        .unwrap_or_else(|| command.to_string());
+    let argv = match resolve_aliases(argv, aliases) {
+        Ok(argv) => argv,
+        Err(e) => return failed_result(dir, display_command(argv), format!("{e:#}\n")),
+    };
+    let command = display_command(&argv);
 
     // Dry run mode: return what would be executed without running it
     if config.dry_run {
-        let dir_display = if dir.as_os_str() == "." {
-            if let Ok(cwd) = std::env::current_dir() {
-                cwd.display().to_string()
-            } else {
-                ".".to_string()
-            }
-        } else {
-            dir.display().to_string()
-        };
-        let stdout_msg = format!("[DRY RUN] Would execute in {dir_display}:\n  {resolved_command}");
+        let stdout = format!("[DRY RUN] {}", dry_run_line(dir, &command));
         return CommandResult {
             success: true,
             exit_code: 0,
             directory: dir.to_path_buf(),
-            command: resolved_command,
-            stdout: stdout_msg,
+            command,
+            stdout,
             stderr: String::new(),
         };
     }
 
-    let (shell, shell_flag) = get_shell_and_flag();
-
-    let mut cmd_builder = Command::new(&shell);
-    cmd_builder
-        .arg(shell_flag)
-        .arg(&resolved_command)
-        .current_dir(dir)
-        .envs(env::vars());
-
-    // Apply plugin-specified environment variables (e.g., GIT_PAGER=cat)
-    if let Some(extra) = extra_env {
-        cmd_builder.envs(extra);
-    }
+    let mut cmd_builder = match build_command(&argv, dir, extra_env) {
+        Ok(cmd) => cmd,
+        Err(e) => return failed_result(dir, command, format!("{e:#}\n")),
+    };
 
     // Force color output when parent stdout is a TTY
     // This is needed because piped stdout makes child processes think they're not in a terminal
@@ -483,19 +484,16 @@ pub fn execute_command_in_directory_capturing(
                 success,
                 exit_code,
                 directory: dir.to_path_buf(),
-                command: resolved_command,
+                command,
                 stdout: String::from_utf8_lossy(&output.stdout).to_string(),
                 stderr: String::from_utf8_lossy(&output.stderr).to_string(),
             }
         }
-        Err(e) => CommandResult {
-            success: false,
-            exit_code: -1,
-            directory: dir.to_path_buf(),
-            command: resolved_command,
-            stdout: String::new(),
-            stderr: format!("Failed to execute: {e}"),
-        },
+        Err(e) => failed_result(
+            dir,
+            command.clone(),
+            format!("Failed to run {command}: {e}\n"),
+        ),
     }
 }
 
@@ -524,51 +522,50 @@ pub fn expand_directories(directories: &[String], ignore: &[String]) -> Result<V
 
 /// Run the same command across multiple directories.
 /// This applies include/exclude filters and then delegates to the unified execution engine.
-pub fn run(orig_config: &LoopConfig, command: &str) -> Result<()> {
+pub fn run(orig_config: &LoopConfig, argv: &[String]) -> Result<()> {
     // Handle special case: add_aliases_to_global_looprc
     if orig_config.add_aliases_to_global_looprc {
         return add_aliases_to_global_looprc();
     }
 
-    // Apply include/exclude filters to directories
-    let mut dirs = orig_config.directories.clone();
-
-    if let Some(ref includes) = orig_config.include_filters {
-        if !includes.is_empty() {
-            dirs.retain(|p| includes.iter().any(|f| p.contains(f)));
-        }
-    }
-
-    if let Some(ref excludes) = orig_config.exclude_filters {
-        if !excludes.is_empty() {
-            if orig_config.verbose {
-                println!("Exclude filters: {excludes:?}");
-            }
-            dirs.retain(|p| {
-                let excluded = excludes.iter().any(|f| {
-                    let f = f.trim_end_matches('/');
-                    p.contains(f)
-                });
-                if orig_config.verbose {
-                    println!("Dir: {p}, excluded: {excluded}");
-                }
-                !excluded
-            });
-        }
-    }
-
     // Build DirCommand list with same command for each directory
-    let commands: Vec<DirCommand> = dirs
+    let commands: Vec<DirCommand> = orig_config
+        .directories
         .iter()
         .map(|dir| DirCommand {
             dir: dir.clone(),
-            cmd: command.to_string(),
+            argv: argv.to_vec(),
             env: orig_config.env.clone(),
         })
         .collect();
 
-    // Delegate to unified execution engine
-    execute_commands_internal(orig_config, &commands)
+    run_commands(orig_config, &commands)
+}
+
+/// Whether an `--include`/`--exclude` value names `dir`: the value is the
+/// whole path of `dir` from `root` (`.` for the root itself, a trailing `/`
+/// and a leading `./` ignored), never a part of it.
+pub fn filter_matches(filter: &str, dir: &str, root: Option<&Path>) -> bool {
+    let filter = filter.trim_end_matches('/');
+    let filter = filter.strip_prefix("./").unwrap_or(filter);
+    if filter.is_empty() {
+        return false;
+    }
+    match root.and_then(|root| repo_path(dir, root)) {
+        Some(path) => filter == path,
+        None => Path::new(filter) == Path::new(dir),
+    }
+}
+
+/// `dir`'s path from `root` as `--include`/`--exclude` name it: `/`-separated,
+/// `.` for the root itself. A relative `dir` is taken from the current
+/// directory. None when `dir` is not under `root`.
+pub fn repo_path(dir: &str, root: &Path) -> Option<String> {
+    let dir = env::current_dir().ok()?.join(dir);
+    match path_from(&dir, root)? {
+        rel if rel.is_empty() => Some(".".to_string()),
+        rel => Some(rel),
+    }
 }
 
 /// JSON output structure for command results
@@ -675,7 +672,7 @@ fn execute_commands_internal(config: &LoopConfig, commands: &[DirCommand]) -> Re
 
                     let result = execute_command_in_directory_capturing(
                         &dir,
-                        &dir_cmd.cmd,
+                        &dir_cmd.argv,
                         config,
                         &aliases,
                         dir_cmd.env.as_ref(),
@@ -766,7 +763,7 @@ fn execute_commands_internal(config: &LoopConfig, commands: &[DirCommand]) -> Re
                 // Capture output for JSON mode
                 execute_command_in_directory_capturing(
                     &dir,
-                    &dir_cmd.cmd,
+                    &dir_cmd.argv,
                     config,
                     &aliases,
                     dir_cmd.env.as_ref(),
@@ -774,7 +771,7 @@ fn execute_commands_internal(config: &LoopConfig, commands: &[DirCommand]) -> Re
             } else {
                 execute_command_in_directory(
                     &dir,
-                    &dir_cmd.cmd,
+                    &dir_cmd.argv,
                     config,
                     &aliases,
                     dir_cmd.env.as_ref(),
@@ -867,24 +864,20 @@ fn execute_commands_internal(config: &LoopConfig, commands: &[DirCommand]) -> Re
 /// This is the unified execution engine for plugins.
 /// Applies include/exclude filters from config before executing.
 pub fn run_commands(config: &LoopConfig, commands: &[DirCommand]) -> Result<()> {
+    let root = config.root_dir.as_deref();
+    let named =
+        |filters: &[String], dir: &str| filters.iter().any(|f| filter_matches(f, dir, root));
     let mut filtered: Vec<DirCommand> = commands.to_vec();
 
-    if let Some(ref includes) = config.include_filters {
-        if !includes.is_empty() {
-            filtered.retain(|c| includes.iter().any(|f| c.dir.contains(f)));
-        }
+    if let Some(includes) = config.include_filters.as_ref().filter(|f| !f.is_empty()) {
+        filtered.retain(|c| named(includes, &c.dir));
     }
 
-    if let Some(ref excludes) = config.exclude_filters {
-        if !excludes.is_empty() {
-            filtered.retain(|c| {
-                let excluded = excludes.iter().any(|f| {
-                    let f = f.trim_end_matches('/');
-                    c.dir.contains(f)
-                });
-                !excluded
-            });
+    if let Some(excludes) = &config.exclude_filters {
+        if config.verbose && !excludes.is_empty() {
+            println!("Exclude filters: {excludes:?}");
         }
+        filtered.retain(|c| !named(excludes, &c.dir));
     }
 
     execute_commands_internal(config, &filtered)
