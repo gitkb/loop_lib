@@ -427,7 +427,7 @@ pub fn execute_command_in_directory_capturing(
             ..failed_result(
                 dir,
                 display_command(argv),
-                format!("Directory does not exist: {}", dir.display()),
+                format!("Directory does not exist: {}", escape_path(dir)),
             )
         };
     }
