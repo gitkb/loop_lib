@@ -27,10 +27,6 @@ pub struct LoopConfig {
     #[serde(default)]
     pub add_aliases_to_global_looprc: bool,
     #[serde(default)]
-    pub include_filters: Option<Vec<String>>,
-    #[serde(default)]
-    pub exclude_filters: Option<Vec<String>>,
-    #[serde(default)]
     pub parallel: bool,
     #[serde(default)]
     pub dry_run: bool,
@@ -76,8 +72,6 @@ impl Default for LoopConfig {
             verbose: false,
             silent: false,
             add_aliases_to_global_looprc: false,
-            include_filters: None,
-            exclude_filters: None,
             parallel: false,
             dry_run: false,
             json_output: false,
@@ -521,7 +515,6 @@ pub fn expand_directories(directories: &[String], ignore: &[String]) -> Result<V
 }
 
 /// Run the same command across multiple directories.
-/// This applies include/exclude filters and then delegates to the unified execution engine.
 pub fn run(orig_config: &LoopConfig, argv: &[String]) -> Result<()> {
     // Handle special case: add_aliases_to_global_looprc
     if orig_config.add_aliases_to_global_looprc {
@@ -540,32 +533,6 @@ pub fn run(orig_config: &LoopConfig, argv: &[String]) -> Result<()> {
         .collect();
 
     run_commands(orig_config, &commands)
-}
-
-/// Whether an `--include`/`--exclude` value names `dir`: the value is the
-/// whole path of `dir` from `root` (`.` for the root itself, a trailing `/`
-/// and a leading `./` ignored), never a part of it.
-pub fn filter_matches(filter: &str, dir: &str, root: Option<&Path>) -> bool {
-    let filter = filter.trim_end_matches('/');
-    let filter = filter.strip_prefix("./").unwrap_or(filter);
-    if filter.is_empty() {
-        return false;
-    }
-    match root.and_then(|root| repo_path(dir, root)) {
-        Some(path) => filter == path,
-        None => Path::new(filter) == Path::new(dir),
-    }
-}
-
-/// `dir`'s path from `root` as `--include`/`--exclude` name it: `/`-separated,
-/// `.` for the root itself. A relative `dir` is taken from the current
-/// directory. None when `dir` is not under `root`.
-pub fn repo_path(dir: &str, root: &Path) -> Option<String> {
-    let dir = env::current_dir().ok()?.join(dir);
-    match path_from(&dir, root)? {
-        rel if rel.is_empty() => Some(".".to_string()),
-        rel => Some(rel),
-    }
 }
 
 /// JSON output structure for command results
@@ -853,7 +820,9 @@ fn execute_commands_internal(config: &LoopConfig, commands: &[DirCommand]) -> Re
         }
     }
 
-    if failed_count > 0 && !config.dry_run {
+    // In a dry run only commands that cannot run (a missing directory, a
+    // broken alias) fail
+    if failed_count > 0 {
         return Err(anyhow::anyhow!("At least one command failed"));
     }
 
@@ -862,25 +831,8 @@ fn execute_commands_internal(config: &LoopConfig, commands: &[DirCommand]) -> Re
 
 /// Execute a list of commands (each with its own directory)
 /// This is the unified execution engine for plugins.
-/// Applies include/exclude filters from config before executing.
 pub fn run_commands(config: &LoopConfig, commands: &[DirCommand]) -> Result<()> {
-    let root = config.root_dir.as_deref();
-    let named =
-        |filters: &[String], dir: &str| filters.iter().any(|f| filter_matches(f, dir, root));
-    let mut filtered: Vec<DirCommand> = commands.to_vec();
-
-    if let Some(includes) = config.include_filters.as_ref().filter(|f| !f.is_empty()) {
-        filtered.retain(|c| named(includes, &c.dir));
-    }
-
-    if let Some(excludes) = &config.exclude_filters {
-        if config.verbose && !excludes.is_empty() {
-            println!("Exclude filters: {excludes:?}");
-        }
-        filtered.retain(|c| !named(excludes, &c.dir));
-    }
-
-    execute_commands_internal(config, &filtered)
+    execute_commands_internal(config, commands)
 }
 
 pub fn should_ignore(path: &Path, ignore: &[String]) -> bool {

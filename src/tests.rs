@@ -130,8 +130,6 @@ fn test_run() {
         verbose: false,
         silent: true,
         add_aliases_to_global_looprc: false,
-        include_filters: None,
-        exclude_filters: None,
         parallel: false,
         dry_run: false,
         json_output: false,
@@ -203,8 +201,6 @@ fn test_run_without_looprc() {
         verbose: false,
         silent: true,
         add_aliases_to_global_looprc: false,
-        include_filters: None,
-        exclude_filters: None,
         parallel: false,
         dry_run: false,
         json_output: false,
@@ -238,8 +234,6 @@ fn test_run_parallel() {
         verbose: false,
         silent: true,
         add_aliases_to_global_looprc: false,
-        include_filters: None,
-        exclude_filters: None,
         parallel: true,
         dry_run: false,
         json_output: false,
@@ -346,44 +340,6 @@ fn strings(values: &[&str]) -> Vec<String> {
     values.iter().map(|s| s.to_string()).collect()
 }
 
-/// The repos `include`/`exclude` select among api, api-legacy and web.
-fn selected(include: &[&str], exclude: &[&str]) -> Vec<String> {
-    let temp_dir = TempDir::new().unwrap();
-    let root = temp_dir.path().join("ws");
-    let names = ["api", "api-legacy", "web"];
-    for name in names {
-        fs::create_dir_all(root.join(name)).unwrap();
-    }
-    let config = LoopConfig {
-        directories: names
-            .iter()
-            .map(|name| root.join(name).display().to_string())
-            .collect(),
-        silent: true,
-        include_filters: Some(strings(include)),
-        exclude_filters: Some(strings(exclude)),
-        root_dir: Some(root.clone()),
-        ..LoopConfig::default()
-    };
-    run(&config, &touch_cmd(Path::new("ran"))).unwrap();
-    names
-        .iter()
-        .filter(|name| root.join(name).join("ran").exists())
-        .map(|name| name.to_string())
-        .collect()
-}
-
-#[test]
-fn filters_name_whole_paths_from_the_root() {
-    assert_eq!(selected(&["api"], &[]), ["api"]);
-    assert_eq!(selected(&["./api/"], &[]), ["api"]);
-    assert_eq!(selected(&[], &["api"]), ["api-legacy", "web"]);
-    assert_eq!(selected(&["api", "web"], &["web"]), ["api"]);
-    // Parts of a path, or of the absolute path, name nothing
-    assert!(selected(&["a"], &[]).is_empty());
-    assert!(selected(&["ws/api"], &[]).is_empty());
-}
-
 /// What git receives as its arguments, quoted by git itself
 fn git_sees(argv: &[&str], aliases: &HashMap<String, String>) -> String {
     let temp_dir = TempDir::new().unwrap();
@@ -431,15 +387,21 @@ fn aliases_expand_into_words_not_shell() {
     assert_eq!(git_sees(&["q", "$(x)"], &aliases), "'two words' ';' '$(x)'");
 
     let broken = HashMap::from([("q".to_string(), "git 'unclosed".to_string())]);
-    let result = execute_command_in_directory_capturing(
-        Path::new("."),
-        &strings(&["q"]),
-        &LoopConfig::default(),
-        &broken,
-        None,
-    );
-    assert!(!result.success);
-    assert!(result.stderr.contains("Alias 'q'"), "{}", result.stderr);
+    for dry_run in [false, true] {
+        let config = LoopConfig {
+            dry_run,
+            ..LoopConfig::default()
+        };
+        let result = execute_command_in_directory_capturing(
+            Path::new("."),
+            &strings(&["q"]),
+            &config,
+            &broken,
+            None,
+        );
+        assert!(!result.success);
+        assert!(result.stderr.contains("Alias 'q'"), "{}", result.stderr);
+    }
 }
 
 #[test]
