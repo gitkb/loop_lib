@@ -7,6 +7,9 @@ repository.workspace = true
 description = "Core loop engine library for running commands across directories"
 
 [dependencies]
+# Any 0.x: child-repo CI builds meta_core as 0.0.0 or 0.1.0, releases as
+# the workspace version
+meta_core = { path = "../meta_core", version = "<1" }
 anyhow = "1.0"
 rayon = "1.5"
 serde = { version = "1.0", features = ["derive"] }

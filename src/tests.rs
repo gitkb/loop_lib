@@ -819,3 +819,18 @@ fn test_display_name_is_path_from_root() {
     assert_eq!(display_name(Path::new("./repo"), None), "repo");
     assert_eq!(result_name(root, Some(root)), ". (harmony)");
 }
+
+#[test]
+fn test_display_names_escape_control_characters() {
+    let root = Path::new("/ws/x\u{1b}]0;TITLE\u{7}");
+    assert_eq!(result_name(root, Some(root)), ". (x\\u{1b}]0;TITLE\\u{7})");
+    assert_eq!(
+        display_name(&root.join("a\u{1b}[2J"), Some(root)),
+        "./a\\u{1b}[2J"
+    );
+    assert_eq!(
+        display_name(Path::new("/elsewhere/n\nfake"), Some(root)),
+        "/elsewhere/n\\nfake"
+    );
+    assert_eq!(display_name(Path::new("b\u{9b}31m"), None), "b\\u{9b}31m");
+}

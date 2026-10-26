@@ -31,11 +31,32 @@ jobs:
           # Use PAT to trigger downstream workflows; fallback to GITHUB_TOKEN
           token: ${{ secrets.PARENT_REPO_PAT || github.token }}
 
+      - name: Clone dependencies
+        shell: bash
+        env:
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: |
+          for repo in meta_core; do
+            url="https://github.com/gitkb/${repo}.git"
+            # Exit code 2 means the branch does not exist; anything else is an error
+            status=0
+            git ls-remote --exit-code --heads "$url" "refs/heads/$BRANCH" > /dev/null || status=$?
+            if [ "$status" -eq 0 ]; then
+              git clone --depth 1 -b "$BRANCH" "$url"
+            elif [ "$status" -eq 2 ]; then
+              echo "Branch ${BRANCH} not found for ${repo}; using the default branch"
+              git clone --depth 1 "$url"
+            else
+              echo "::error::Failed to look up ${repo}"
+              exit 1
+            fi
+          done
+
       - name: Create workspace Cargo.toml
         run: |
           cat > Cargo.toml << 'EOF'
           [workspace]
-          members = ["loop_lib"]
+          members = ["loop_lib", "meta_core"]
           resolver = "2"
 
           [workspace.package]

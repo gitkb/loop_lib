@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use colored::*;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use meta_core::display::{escape, escape_path};
 use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
 use serde::{Deserialize, Serialize};
@@ -201,8 +202,12 @@ pub fn add_aliases_to_global_looprc() -> Result<()> {
 /// How a directory is named in progress and result lines: `.` for the root,
 /// `./open-source/meta/loop_cli` for a directory under it, so repos that share
 /// a basename stay distinguishable, and the full path for one outside it.
-/// Without a root, the basename.
+/// Without a root, the basename. Control characters in it are escaped.
 fn display_name(dir: &Path, root: Option<&Path>) -> String {
+    escape(&plain_display_name(dir, root)).into_owned()
+}
+
+fn plain_display_name(dir: &Path, root: Option<&Path>) -> String {
     let Some(root) = root else {
         return dir
             .file_name()
@@ -241,7 +246,7 @@ fn result_name(dir: &Path, root: Option<&Path>) -> String {
         Some(dir.to_path_buf())
     };
     match base.as_deref().and_then(Path::file_name) {
-        Some(base) => format!(". ({})", base.to_string_lossy()),
+        Some(base) => format!(". ({})", escape(&base.to_string_lossy())),
         None => name,
     }
 }
@@ -302,10 +307,10 @@ fn failed_result(dir: &Path, command: String, stderr: String) -> CommandResult {
 fn dry_run_line(dir: &Path, command: &str) -> String {
     let dir_display = if dir.as_os_str() == "." {
         env::current_dir()
-            .map(|cwd| cwd.display().to_string())
+            .map(|cwd| escape_path(&cwd))
             .unwrap_or_else(|_| ".".to_string())
     } else {
-        dir.display().to_string()
+        escape_path(dir)
     };
     format!("Would execute in {dir_display}:\n  {command}")
 }
@@ -318,7 +323,7 @@ pub fn execute_command_in_directory(
     extra_env: Option<&HashMap<String, String>>,
 ) -> CommandResult {
     if !dir.exists() {
-        println!("\nNo directory found for {}", dir.display());
+        println!("\nNo directory found for {}", escape_path(dir));
         println!(
             "\x1b[31m\n✗ {}: No directory found. Command: {} (Exit code: {})\x1b[0m",
             display_name(dir, config.root_dir.as_deref()),
@@ -356,7 +361,7 @@ pub fn execute_command_in_directory(
     }
 
     if config.verbose {
-        println!("Executing in directory: {}", dir.display());
+        println!("Executing in directory: {}", escape_path(dir));
     }
 
     if !config.silent {
@@ -422,7 +427,7 @@ pub fn execute_command_in_directory_capturing(
             ..failed_result(
                 dir,
                 display_command(argv),
-                format!("Directory does not exist: {}", dir.display()),
+                format!("Directory does not exist: {}", escape_path(dir)),
             )
         };
     }
@@ -806,7 +811,7 @@ fn execute_commands_internal(config: &LoopConfig, commands: &[DirCommand]) -> Re
                 // Without a root the basename is ambiguous, so keep the full path
                 let name = match config.root_dir.as_deref() {
                     Some(root) => result_name(&result.directory, Some(root)),
-                    None => result.directory.display().to_string(),
+                    None => escape_path(&result.directory),
                 };
                 println!(
                     "\n{} {}: {} (Exit code {}) ",
