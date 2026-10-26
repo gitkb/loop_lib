@@ -177,12 +177,14 @@ fn test_execute_command_in_directory() {
     let temp_dir = TempDir::new().unwrap();
 
     let result =
-        execute_command_in_directory(temp_dir.path(), &sh("echo test"), &config, &aliases, None);
+        execute_command_in_directory(temp_dir.path(), &sh("echo test"), &config, &aliases, None)
+            .unwrap();
     assert!(result.success);
     assert_eq!(result.exit_code, 0);
 
     let result =
-        execute_command_in_directory(temp_dir.path(), &fail_cmd(), &config, &aliases, None);
+        execute_command_in_directory(temp_dir.path(), &fail_cmd(), &config, &aliases, None)
+            .unwrap();
     assert!(!result.success);
     assert_eq!(result.exit_code, 1);
 }
@@ -477,7 +479,8 @@ fn test_execute_command_in_directory_dry_run() {
     let temp_dir = TempDir::new().unwrap();
 
     let result =
-        execute_command_in_directory(temp_dir.path(), &fail_cmd(), &config, &aliases, None);
+        execute_command_in_directory(temp_dir.path(), &fail_cmd(), &config, &aliases, None)
+            .unwrap();
     assert!(result.success, "dry_run should return success");
     assert_eq!(result.exit_code, 0);
 }
