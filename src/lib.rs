@@ -404,7 +404,7 @@ pub fn execute_command_in_directory(
             Stdio::inherit()
         })
         .status()
-        .with_context(|| format!("Failed to run {command}"))
+        .with_context(|| format!("Failed to run {}", escape(&command)))
     });
     let (success, exit_code) = match status {
         Ok(status) => (status.success(), status.code().unwrap_or(-1)),
