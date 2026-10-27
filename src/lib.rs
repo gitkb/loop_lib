@@ -312,7 +312,7 @@ fn dry_run_line(dir: &Path, command: &str) -> String {
     } else {
         escape_path(dir)
     };
-    format!("Would execute in {dir_display}:\n  {command}")
+    format!("Would execute in {dir_display}:\n  {}", escape(command))
 }
 
 /// A write to command-output stdout failed. Kept distinct from child stdin errors.
@@ -346,7 +346,7 @@ pub fn execute_command_in_directory(
         command_println!(
             "\x1b[31m\n✗ {}: No directory found. Command: {} (Exit code: {})\x1b[0m",
             display_name(dir, config.root_dir.as_deref()),
-            display_command(argv),
+            escape(&display_command(argv)),
             1
         );
         return Ok(CommandResult {
@@ -514,7 +514,7 @@ pub fn execute_command_in_directory_capturing(
         Err(e) => failed_result(
             dir,
             command.clone(),
-            format!("Failed to run {command}: {e}\n"),
+            format!("Failed to run {}: {e}\n", escape(&command)),
         ),
     }
 }
@@ -840,7 +840,7 @@ fn execute_commands_internal(config: &LoopConfig, commands: &[DirCommand]) -> Re
                     "\n{} {}: {} (Exit code {}) ",
                     "✗".red(),
                     name,
-                    result.command,
+                    escape(&result.command),
                     result.exit_code
                 );
             }
