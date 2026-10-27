@@ -263,7 +263,13 @@ fn resolve_aliases(argv: &[String], aliases: &HashMap<String, String>) -> Result
     };
     let mut words = shlex::split(alias)
         .filter(|words| !words.is_empty())
-        .with_context(|| format!("Alias '{program}' is not a command: {alias}"))?;
+        .with_context(|| {
+            format!(
+                "Alias '{}' is not a command: {}",
+                escape(program),
+                escape(alias)
+            )
+        })?;
     words.extend_from_slice(args);
     Ok(words)
 }

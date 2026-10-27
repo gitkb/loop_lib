@@ -837,3 +837,17 @@ fn test_display_names_escape_control_characters() {
     );
     assert_eq!(display_name(Path::new("b\u{9b}31m"), None), "b\\u{9b}31m");
 }
+
+#[test]
+fn a_malformed_alias_is_named_escaped() {
+    let aliases = HashMap::from([(
+        "bad\u{1b}[2J".to_string(),
+        "'unclosed\u{1b}[2J\nFORGED".to_string(),
+    )]);
+    let err = resolve_aliases(&["bad\u{1b}[2J".to_string()], &aliases).unwrap_err();
+    let message = format!("{err:#}");
+    assert!(
+        !message.contains('\u{1b}') && !message.contains('\n'),
+        "{message}"
+    );
+}
