@@ -177,12 +177,14 @@ fn test_execute_command_in_directory() {
     let temp_dir = TempDir::new().unwrap();
 
     let result =
-        execute_command_in_directory(temp_dir.path(), &sh("echo test"), &config, &aliases, None);
+        execute_command_in_directory(temp_dir.path(), &sh("echo test"), &config, &aliases, None)
+            .unwrap();
     assert!(result.success);
     assert_eq!(result.exit_code, 0);
 
     let result =
-        execute_command_in_directory(temp_dir.path(), &fail_cmd(), &config, &aliases, None);
+        execute_command_in_directory(temp_dir.path(), &fail_cmd(), &config, &aliases, None)
+            .unwrap();
     assert!(!result.success);
     assert_eq!(result.exit_code, 1);
 }
@@ -477,7 +479,8 @@ fn test_execute_command_in_directory_dry_run() {
     let temp_dir = TempDir::new().unwrap();
 
     let result =
-        execute_command_in_directory(temp_dir.path(), &fail_cmd(), &config, &aliases, None);
+        execute_command_in_directory(temp_dir.path(), &fail_cmd(), &config, &aliases, None)
+            .unwrap();
     assert!(result.success, "dry_run should return success");
     assert_eq!(result.exit_code, 0);
 }
@@ -833,4 +836,18 @@ fn test_display_names_escape_control_characters() {
         "/elsewhere/n\\nfake"
     );
     assert_eq!(display_name(Path::new("b\u{9b}31m"), None), "b\\u{9b}31m");
+}
+
+#[test]
+fn a_malformed_alias_is_named_escaped() {
+    let aliases = HashMap::from([(
+        "bad\u{1b}[2J".to_string(),
+        "'unclosed\u{1b}[2J\nFORGED".to_string(),
+    )]);
+    let err = resolve_aliases(&["bad\u{1b}[2J".to_string()], &aliases).unwrap_err();
+    let message = format!("{err:#}");
+    assert!(
+        !message.contains('\u{1b}') && !message.contains('\n'),
+        "{message}"
+    );
 }

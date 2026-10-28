@@ -263,7 +263,13 @@ fn resolve_aliases(argv: &[String], aliases: &HashMap<String, String>) -> Result
     };
     let mut words = shlex::split(alias)
         .filter(|words| !words.is_empty())
-        .with_context(|| format!("Alias '{program}' is not a command: {alias}"))?;
+        .with_context(|| {
+            format!(
+                "Alias '{}' is not a command: {}",
+                escape(program),
+                escape(alias)
+            )
+        })?;
     words.extend_from_slice(args);
     Ok(words)
 }
@@ -312,7 +318,26 @@ fn dry_run_line(dir: &Path, command: &str) -> String {
     } else {
         escape_path(dir)
     };
-    format!("Would execute in {dir_display}:\n  {command}")
+    format!("Would execute in {dir_display}:\n  {}", escape(command))
+}
+
+/// A write to command-output stdout failed. Kept distinct from child stdin errors.
+#[derive(Debug)]
+pub struct StdoutError(pub io::Error);
+
+impl std::fmt::Display for StdoutError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Failed to write command output: {}", self.0)
+    }
+}
+
+impl std::error::Error for StdoutError {}
+
+macro_rules! command_print {
+    ($($arg:tt)*) => { write!(io::stdout().lock(), $($arg)*).map_err(StdoutError)? };
+}
+macro_rules! command_println {
+    ($($arg:tt)*) => { writeln!(io::stdout().lock(), $($arg)*).map_err(StdoutError)? };
 }
 
 pub fn execute_command_in_directory(
@@ -321,19 +346,19 @@ pub fn execute_command_in_directory(
     config: &LoopConfig,
     aliases: &HashMap<String, String>,
     extra_env: Option<&HashMap<String, String>>,
-) -> CommandResult {
+) -> Result<CommandResult> {
     if !dir.exists() {
-        println!("\nNo directory found for {}", escape_path(dir));
-        println!(
+        command_println!("\nNo directory found for {}", escape_path(dir));
+        command_println!(
             "\x1b[31m\n✗ {}: No directory found. Command: {} (Exit code: {})\x1b[0m",
             display_name(dir, config.root_dir.as_deref()),
-            display_command(argv),
+            escape(&display_command(argv)),
             1
         );
-        return CommandResult {
+        return Ok(CommandResult {
             exit_code: 1,
             ..failed_result(dir, display_command(argv), String::new())
-        };
+        });
     }
 
     let argv = match resolve_aliases(argv, aliases) {
@@ -342,31 +367,35 @@ pub fn execute_command_in_directory(
             if !config.silent {
                 eprintln!("{e:#}");
             }
-            return failed_result(dir, display_command(argv), format!("{e:#}\n"));
+            return Ok(failed_result(
+                dir,
+                display_command(argv),
+                format!("{e:#}\n"),
+            ));
         }
     };
     let command = display_command(&argv);
 
     // Dry run mode: print what would be executed without running it
     if config.dry_run {
-        println!("{} {}", "[DRY RUN]".cyan(), dry_run_line(dir, &command));
-        return CommandResult {
+        command_println!("{} {}", "[DRY RUN]".cyan(), dry_run_line(dir, &command));
+        return Ok(CommandResult {
             success: true,
             exit_code: 0,
             directory: dir.to_path_buf(),
             command,
             stdout: String::new(),
             stderr: String::new(),
-        };
+        });
     }
 
     if config.verbose {
-        println!("Executing in directory: {}", escape_path(dir));
+        command_println!("Executing in directory: {}", escape_path(dir));
     }
 
     if !config.silent {
-        println!();
-        io::stdout().flush().ok();
+        command_println!();
+        io::stdout().flush().map_err(StdoutError)?;
     }
 
     let status = build_command(&argv, dir, extra_env).and_then(|mut cmd| {
@@ -381,7 +410,7 @@ pub fn execute_command_in_directory(
             Stdio::inherit()
         })
         .status()
-        .with_context(|| format!("Failed to run {command}"))
+        .with_context(|| format!("Failed to run {}", escape(&command)))
     });
     let (success, exit_code) = match status {
         Ok(status) => (status.success(), status.code().unwrap_or(-1)),
@@ -396,21 +425,21 @@ pub fn execute_command_in_directory(
     if !config.silent {
         let name = result_name(dir, config.root_dir.as_deref());
         if success {
-            println!("\x1b[32m\n✓ {name}\x1b[0m");
+            command_println!("\x1b[32m\n✓ {name}\x1b[0m");
         } else {
-            println!("\x1b[31m\n✗ {name}: exited code {exit_code}\x1b[0m");
+            command_println!("\x1b[31m\n✗ {name}: exited code {exit_code}\x1b[0m");
         }
-        io::stdout().flush().ok();
+        io::stdout().flush().map_err(StdoutError)?;
     }
 
-    CommandResult {
+    Ok(CommandResult {
         success,
         exit_code,
         directory: dir.to_path_buf(),
         command,
         stdout: String::new(), // Sequential mode uses Stdio::inherit(), so no capture
         stderr: String::new(),
-    }
+    })
 }
 
 /// Capturing version for parallel execution - captures stdout/stderr for display after completion
@@ -491,7 +520,7 @@ pub fn execute_command_in_directory_capturing(
         Err(e) => failed_result(
             dir,
             command.clone(),
-            format!("Failed to run {command}: {e}\n"),
+            format!("Failed to run {}: {e}\n", escape(&command)),
         ),
     }
 }
@@ -703,7 +732,7 @@ fn execute_commands_internal(config: &LoopConfig, commands: &[DirCommand]) -> Re
                 .any(|r| !r.stdout.trim().is_empty() || !r.stderr.trim().is_empty());
 
             if has_any_output {
-                println!();
+                command_println!();
             }
 
             for result in results.iter() {
@@ -713,17 +742,17 @@ fn execute_commands_internal(config: &LoopConfig, commands: &[DirCommand]) -> Re
                     !result.stdout.trim().is_empty() || !result.stderr.trim().is_empty();
                 if has_output {
                     if result.success {
-                        println!("{} {}:", "✓".green(), dir_name.green());
+                        command_println!("{} {}:", "✓".green(), dir_name.green());
                     } else {
-                        println!("{} {}:", "✗".red(), dir_name.red());
+                        command_println!("{} {}:", "✗".red(), dir_name.red());
                     }
                     if !result.stdout.trim().is_empty() {
-                        print!("{}", result.stdout);
+                        command_print!("{}", result.stdout);
                     }
                     if !result.stderr.trim().is_empty() {
-                        print!("{}", result.stderr);
+                        command_print!("{}", result.stderr);
                     }
-                    println!(); // Blank line after each repo's output
+                    command_println!(); // Blank line after each repo's output
                 }
             }
         }
@@ -747,7 +776,7 @@ fn execute_commands_internal(config: &LoopConfig, commands: &[DirCommand]) -> Re
                     config,
                     &aliases,
                     dir_cmd.env.as_ref(),
-                )
+                )?
             };
             results
                 .lock()
@@ -788,20 +817,20 @@ fn execute_commands_internal(config: &LoopConfig, commands: &[DirCommand]) -> Re
             },
         };
 
-        println!("{}", serde_json::to_string_pretty(&output)?);
+        command_println!("{}", serde_json::to_string_pretty(&output)?);
     } else if !config.silent {
         // Text output mode
         if config.dry_run {
-            println!(
+            command_println!(
                 "\n{} Would run {} command(s) across {} directories",
                 "[DRY RUN]".cyan(),
                 total.to_string().yellow(),
                 total.to_string().yellow()
             );
         } else if failed_count == 0 {
-            println!("{} commands complete", total.to_string().green());
+            command_println!("{} commands complete", total.to_string().green());
         } else {
-            println!(
+            command_println!(
                 "\nSummary: {} {} out of {} commands failed",
                 "✗".red(),
                 failed_count.to_string().red(),
@@ -813,15 +842,15 @@ fn execute_commands_internal(config: &LoopConfig, commands: &[DirCommand]) -> Re
                     Some(root) => result_name(&result.directory, Some(root)),
                     None => escape_path(&result.directory),
                 };
-                println!(
+                command_println!(
                     "\n{} {}: {} (Exit code {}) ",
                     "✗".red(),
                     name,
-                    result.command,
+                    escape(&result.command),
                     result.exit_code
                 );
             }
-            println!();
+            command_println!();
         }
     }
 
